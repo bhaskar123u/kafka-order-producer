@@ -1,0 +1,178 @@
+Kafka Architecture :
+            ┌──────────────────────────────────────────────────────────┐
+            │          KAFKA CLUSTER<VW6mOBmgQqK0ckUDIWnGPw>           │
+            │                                                          │
+            │  ┌────────────────────────────────────────────────────┐  │
+            │  │             KRaft Controller Quorum                │  │
+            │  │                                                    │  │
+            │  │  Controller 1 ◄──── Raft ────► Controller 2        │  │
+            │  │       │                              │             │  │
+            │  │       └──────────► Controller 3 ◄────┘             │  │
+            │  │                                                    │  │
+            │  │  Responsible for CLUSTER METADATA                  │  │
+            │  │                                                    │  │
+            │  │  • Topics                                          │  │
+            │  │  • Partitions                                      │  │
+            │  │  • Replica assignments                             │  │
+            │  │  • Partition leadership                            │  │
+            │  │  • Broker membership/state                         │  │
+            │  │  • Cluster configuration                           │  │
+            │  │  • Metadata log                                    │  │
+            │  └───────────────────────┬────────────────────────────┘  │
+            │                          │                               │
+            │                     Metadata                             │
+            │                          │                               │
+            │             ┌────────────┼────────────┐                  │
+            │             ▼            ▼            ▼                  │
+            │        ┌─────────┐  ┌─────────┐  ┌─────────┐             │
+            │        │ Broker 1│  │ Broker 2│  │ Broker 3│             │
+            │        └────┬────┘  └────┬────┘  └────┬────┘             │
+            │             │            │            │                  │
+            │             ▼            ▼            ▼                  │
+            │        Partition     Partition     Partition             │
+            │           DATA          DATA          DATA               │
+            │                                                          │
+            │  Brokers are responsible for DATA PLANE                  │
+            │                                                          │
+            │  • Produce requests                                      │
+            │  • Fetch requests                                        │
+            │  • Store records                                         │
+            │  • Partition logs                                        │
+            │  • Replicate partition data                              │
+            │  • Serve consumers                                       │
+            │  • Consumer group coordination                           │
+            │  • Transaction coordination                              │
+            │                                                          │
+            └──────────────────────────────────────────────────────────┘
+
+1. After configuring all the nodes, we need to start a cluster. Let's first create a random cluster-id : bin % ./kafka-storage.sh random-uuid
+VW6mOBmgQqK0ckUDIWnGPw
+
+2. Attach all node with this cluster-id : kafka_2.13-4.3.0 % bin/kafka-storage.sh format -t VW6mOBmgQqK0ckUDIWnGPw -c config/controller1.properties
+Bootstrap metadata: BootstrapMetadata(records=[ApiMessageAndVersion(FeatureLevelRecord(name='metadata.version', featureLevel=30) at version 0), ApiMessageAndVersion(FeatureLevelRecord(name='eligible.leader.replicas.version', featureLevel=1) at version 0), ApiMessageAndVersion(FeatureLevelRecord(name='group.version', featureLevel=1) at version 0), ApiMessageAndVersion(FeatureLevelRecord(name='share.version', featureLevel=1) at version 0), ApiMessageAndVersion(FeatureLevelRecord(name='streams.version', featureLevel=1) at version 0), ApiMessageAndVersion(FeatureLevelRecord(name='transaction.version', featureLevel=2) at version 0)], metadataVersionLevel=30, source=format command)
+Formatting metadata directory /Users/bhaskarsharan/Desktop/logs/kafka/controller-1 with metadata.version 4.3-IV0.
+bhaskarsharan@Bhaskars-MacBook-Pro kafka_2.13-4.3.0 %l
+
+Q) What does format command do?
+It prepares this directory to become the persistent storage for particular Kafka node and particular Kafka cluster. It initializes the directory so Kafka knows "This storage belongs to Kafka cluster X and node Y."
+
+3. Start node servers -> start controller then brokers : kafka_2.13-4.3.0 % bin/kafka-server-start.sh config/controller1.properties
+
+4. Verify quorum details : kafka_2.13-4.3.0 % bin/kafka-metadata-quorum.sh --bootstrap-controller localhost:9093 describe --status
+ClusterId:              lsxd0bW8SyiKtOOthb5F5Q
+LeaderId:               1
+LeaderEpoch:            1
+HighWatermark:          3515
+MaxFollowerLag:         0
+MaxFollowerLagTimeMs:   0
+CurrentVoters:          [{"id": 1, "endpoints": ["CONTROLLER://localhost:9093"]}, {"id": 2, "endpoints": ["CONTROLLER://localhost:9193"]}]
+CurrentObservers:       [{"id": 3, "directoryId": "HCg0jhlhVtpejKTeWW-U3A"}, {"id": 4, "directoryId": "2QtuSIHg_VKgMOosOo2UOg"}]
+bhaskarsharan@Bhaskars-MacBook-Pro kafka_2.13-4.3.0 %
+
+5. create a topic : kafka_2.13-4.3.0 % bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic order-events-topic
+
+6. describe a topic : kafka_2.13-4.3.0 % bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic order-events-topic
+
+7. stat producer && produce message : kafka_2.13-4.3.0 % bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic order-events-topic
+OR
+bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic order-events-topic --reader-property parse.key=true --reader-property key.separator=:
+(using the 2nd one, we can produce in a k-v manner)
+
+8. start consumer && consume message : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events --from-beginning --group order-events-consumer (in local terminal we would run this N times, to start N consumers)
+
+9. check which message went to which partition : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events-topic --from-beginning --formatter-property print.partition=true --formatter-property print.offset=true
+
+10. check which partition is assigned to which consumer : kafka_2.13-4.3.0 % bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group order-events-topic-consumer
+
+11. A KRaft broker needs more than local storage initialization to become operational. During startup, it must register with the KRaft controller quorum and catch up with the cluster metadata. If the controller quorum is unavailable, the broker cannot complete startup and its broker listener is eventually shut down. Once the quorum becomes available, the broker can register, synchronize metadata, and become available to producers/consumers.
+
+An already-operational broker can continue serving certain existing data-plane operations even when the controller quorum becomes unavailable, because it already has the necessary partition/leader information locally.
+
+12. There is a chance that duplicate messages are logged in kafka logs. What might happen is, assume there is a event(E1) and it has a message (ABC), now ABC is in kafka log file at offset 1. The broker send back ack to producer but the ack fails. Now broker will hit a retry if it didn't get the ack. Hence the same event(E1) is send again and now the broker again appends the same message in logs, so eventually we have
+Broker-1.logs:
+E1 : offset 1
+E1 : offset 2
+
+13. There is also a message re-ordering condition that might happen in kafka. When we enable these settings : max.in.flight.requests.per.connection = N and retry > 0. For now, assume these batches have 1 event in them. What might happen is, assume there are multiple partition of record accumulator(batch-1, batch-2) which is being written in socket. Now assume batch-1 failed due to some issue but batch-2 succeeded(broker appended all events in logs files).
+Broker-1.logs:
+E2 : offset 1
+Now if the retry is configured and ack is not received then, the batch-1 will be again send from producer to broker. Now the overall ordering would be all events of batch-2 followed by all events of batch-1.
+Broker-1.logs:
+E2 : offset 1 (might be related to order-payment)
+E1 : offset 2 (might be related to order-creation)
+This happens as broker has no way to identify if the events they are getting are in order. The solution is to set : spring.kafka.producer.properties.enable.idempotence = true in producer
+
+RecordAccumulator may be visualised as below :
+
+T:P0 → Batch 16KB ─┐
+T:P1 → Batch 12KB ─┼─→ Sender → ProduceRequest → Socket
+T:P2 → Batch 16KB ─┘
+
+               Overall Flow
+┌──────────────────────────────────────────────┐
+│       Spring Boot Application JVM            │
+│                                              │
+│  Your Controller / Service                   │
+│          │                                   │
+│          │ KafkaTemplate.send()              │
+│          ↓                                   │
+│     KafkaProducer                            │
+│          │                                   │
+│          ↓                                   │
+│    Serialization                             │
+│          │                                   │
+│          ↓                                   │
+│    RecordAccumulator                         │
+│       │   │   │                              │
+│       │   │   └── Batch → Topic-A/P2         │
+│       │   └────── Batch → Topic-A/P1         │
+│       └────────── Batch → Topic-A/P0         │
+│                    │                         │
+│                    ↓                         │
+│              Sender Thread                   │
+│                    │                         │
+│                    ↓                         │
+│              NetworkClient                   │
+│                    │                         │
+│                    ↓                         │
+│              TCP Socket                      │
+└────────────────────┼─────────────────────────┘
+                     │
+                     │ TCP connection
+                     ↓
+              ┌───────────────┐
+              │ Kafka Broker  │
+              └───────────────┘
+
+13. What happens when spring.kafka.producer.properties.enable.idempotence=true is true?
+Sender End:
+In producer, for each topic+partition a different batch is created in record-accumulator. Now when we enable this key, each producer gets a unique ID, this is the producerId(not stored anywhere). Now in each batch apart from events 3 additional details are added - PID, BaseSequence(the start sequence number of batch), LastSequence(The last number showing total events inserted till date).
+Receiver End:
+        Batch-1
+        Topic-A
+        Partition-0
+        PID:1001
+        BaseSequence:0 (meaning this is the 1st batch)
+        LastSequence:2
+        [E1:seq0, E2:seq1, E3:seq2] (created at producer's end)
+When the batch is received, broker checks in it's in-memory map the next sequence for a given [topic+partition+PID] what is the next sequence it is expecting, and it matches with the BaseSequence. So the 2nd time this batch will be received, it will be as below:
+        Batch-2
+        Topic-A
+        Partition-0
+        PID:1001
+        BaseSequence:3 (meaning this is not the 1st batch)
+        LastSequence:4
+        [E4:seq3, E5:seq4]
+If this is the case, then only batch is accepted. But if a producer re-starts, it will get a new ProducerId. Assume a case where ack was not received for a batch(the batch is already in logs). Also assume as soon as producer was trying to send the batch again, it crashed. The producer restart and a new producerId is assigned to it. Now this time the batch will be sent with almost all same data except PID and kafka will accept it a and write it in logs, even though they are duplicate events. This can be solved with 'transactions'. When we are using idempotency, we should make the
+
+
+
+
+
+
+
+
+
+
+
+

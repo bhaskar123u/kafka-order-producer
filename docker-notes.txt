@@ -1,0 +1,210 @@
+Initial architecture :
+
+                         KRaft Kafka Cluster
+                  Cluster ID = <same cluster ID>
+                              │
+                ┌─────────────┴─────────────┐
+                │                           │
+                ▼                           ▼
+       Controller Quorum               Kafka Brokers
+                │                           │
+     ┌──────────┼──────────┐          ┌─────┴─────┐
+     │          │          │          │           │
+     ▼          ▼          ▼          ▼           ▼
+ Controller  Controller  Controller  Broker-1   Broker-2
+   Node 1      Node 2      Node 3     Node 4     Node 5
+   :9093       :9093       :9093      :9092      :9092
+     │          │          │           │           │
+     └──────────┼──────────┘           │           │
+                │                      │           │
+                └────── Metadata ──────┘           │
+                                                   │
+                              ┌────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────────┐
+                    │    Kafka Clients    │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    ▼                     ▼
+                 Producer              Consumer
+                   Mac                    Mac
+
+
+  Docker internal ports
+  ─────────────────────
+  Controllers(1,2,3) → :9093
+  Broker-1           → :9092
+  Broker-2           → :9092
+
+  Mac host ports
+  ─────────────────────
+  Broker-1    → localhost:9092
+  Broker-2    → localhost:9192
+
+Conceptually when we start docker desktop, it creates a linux VM inside and run on it. So it's look like below :
+
+                        YOUR MAC
+                 M4 Pro / macOS / 24GB
+                           │
+                           │
+                    Docker Desktop
+                           │
+                      Linux VM
+                           │
+                 Docker networking
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+    Kafka Container  Kafka Container  Kafka Container
+          │                │                │
+          ▼                ▼                ▼
+     Kafka JVM         Kafka JVM         Kafka JVM
+          │                │                │
+          ▼                ▼                ▼
+     Controller 1      Controller 2      Controller 3
+       Node 1            Node 2            Node 3
+       :9093             :9093             :9093
+          │                │                │
+          └────────────────┼────────────────┘
+                           │
+                    Controller Quorum
+                           │
+                           ▼
+              ┌─────────────────────────┐
+              │                         │
+              ▼                         ▼
+        Kafka Container           Kafka Container
+              │                         │
+              ▼                         ▼
+         Kafka JVM                  Kafka JVM
+              │                         │
+              ▼                         ▼
+          Broker 1                  Broker 2
+           Node 4                   Node 5
+           :9092                    :9092
+              │                         │
+              │                         │
+       localhost:9092(mac-port)    localhost:9192(mac-port)
+              │                         │
+              └────────────┬────────────┘
+                           │
+                           ▼
+                    Kafka Clients
+                           │
+                    ┌──────┴──────┐
+                    ▼             ▼
+                 Producer      Consumer
+                   Mac            Mac
+
+Docker is providing the isolation, networking, filesystem and lifecycle environment. Kafka still sees four Kafka nodes/processes communicating over a network. Kafka container isn't booting its own Linux operating system, that's why containers are much lighter than VMs. Assume a application connects to this, it will look like
+                   Mac
+                    │
+                    │ localhost:9092
+                    ▼
+                  Docker
+                    │
+                    ▼
+                broker-1:9092
+whereas the container to container communication happens via
+                controller-2
+                    │
+                    │ controller-1:9093
+                    ▼
+                controller-1
+
+Now how these containers are connected to each other can be understood using an analogy as below. In my home network
+                  Internet
+                     │
+                Public IP
+                     │
+               Airtel Router
+                 NAT table
+                     │
+        ┌────────────┼────────────┐
+        │            │            │
+       Mac         Phone          TV
+   192.168.1.10  192.168.1.11  192.168.1.12
+
+In docker network
+                 Linux VM
+                     │
+                Docker bridge (switch to exchange packets on same network)
+                     │
+        ┌────────────┼────────────┐
+        │            │            │
+       C1           C2           C3
+   172.20.0.2   172.20.0.3   172.20.0.4
+        │            │            │
+      :9093        :9093        :9093
+The Docker bridge plays a role somewhat analogous to a virtual Ethernet switch, while Docker's networking machinery handles routing/NAT where needed and the containers' network namespaces are analogous to giving each environment its own networking stack.
+
+Generate cluster id - docker run --rm apache/kafka:4.3.1 /opt/kafka/bin/kafka-storage.sh random-uuid
+
+Start controller :
+docker run --rm \
+  -v "$(pwd)/controller-1:/var/lib/kafka/data" \
+  -v "$(pwd)/controller-1.properties:/tmp/server.properties:ro" \
+  apache/kafka:4.3.1 \
+  /opt/kafka/bin/kafka-storage.sh format \
+  -t MYgG2PrBQx-orkm6997YdA \
+  -c /tmp/server.properties
+
+Check quorum :
+docker exec kafka-controller-1 /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-controller controller-1:9093 describe --status
+
+When the spring-application starts, then what happens
+             Spring Boot starts
+                    │
+                    ▼
+        Spring ApplicationContext
+             initializes beans
+                    │
+                    ▼
+              KafkaAdmin
+                    │
+                    │ connects using
+                    │ bootstrap servers
+                    ▼
+          Kafka Broker(s)
+                    │
+                    │ metadata / topic
+                    │ existence information
+                    ▼
+          Does order-events exist?
+              │             │
+             NO            YES
+              │             │
+              ▼             ▼
+        CreateTopic       Nothing to
+        request           create
+              │
+              ▼
+       Kafka Controller
+              │
+              ▼
+       Topic metadata
+       is stored in
+       Kafka cluster
+                    │
+                    ▼
+             Application
+             finishes startup
+                    │
+                    ▼
+          Application READY
+                    │
+                    ▼
+          First API request
+
+Execute kafka commands in container : docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server broker-1:9092
+
+Explore order-topic: docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --describe --topic order-events --bootstrap-server broker-1:9092
+
+Start a consumer : docker exec -it kafka-broker-1 /opt/kafka/bin/kafka-console-consumer.sh --topic order-events --bootstrap-server broker-1:9092 --from-beginning
+
+Describe a topic : docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --describe --topic order-events --bootstrap-server broker-1:9092
+
+Check actual log file, given a broker node and a topic : docker exec kafka-broker-1 find /tmp/kafka-logs -type f -path '*/order-events-*/*.log'
