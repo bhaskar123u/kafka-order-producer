@@ -8,7 +8,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.IntStream;
 
 import static com.bsharan.kafka_order_producer.constants.AppConstants.characters;
 
@@ -23,6 +25,10 @@ public class OrderProducerService {
     @Autowired
     @Qualifier("customSerializerKafkaTemplate")
     private KafkaTemplate<String, Order> customSerializerKafkaTemplate;
+
+    private static final List<String> PRODUCT_IDS = IntStream.rangeClosed(1, 100)
+            .mapToObj(i -> String.format("P%03d", i))
+            .toList();
 
     public void sendWithKey(Order order){
         String key = order.getOrderId();
@@ -67,7 +73,7 @@ public class OrderProducerService {
             future.whenComplete((result, exception) -> {
                 // Successful send
                 if (exception == null) {
-                    System.out.println("SUCCESS | partition=" + result.getRecordMetadata().partition() + " | offset=" + result.getRecordMetadata().offset());
+                    System.out.println("\u001B[31mSUCCESS | partition=" + result.getRecordMetadata().partition() + " | offset=" + result.getRecordMetadata().offset() + "\u001B[0m");
                     return;
                 }
                 // Spring Kafka may wrap the actual Kafka exception
@@ -128,9 +134,11 @@ public class OrderProducerService {
         Order order = new Order();
         order.setOrderId(generateSixDigitNumber());
         order.setCustomerId(generateAlphaNumeric(10));
-        order.setProductId(generateAlphaNumeric(7));
-        order.setQuantity(Integer.valueOf(String.valueOf((int) (Math.random() * 5) + 1)));
-        order.setTotalAmount(Double.valueOf(String.valueOf((int) (Math.random() * 5000) + 100)));
+        // Pick a random product from the fixed list of 100 products
+        String productId = PRODUCT_IDS.get((int) (Math.random() * PRODUCT_IDS.size()));
+        order.setProductId(productId);
+        order.setQuantity((int) (Math.random() * 5) + 1);
+        order.setTotalAmount((double) (Math.random() * 5000) + 100);
         order.setStatus("CREATED");
         return order;
     }
