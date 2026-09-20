@@ -73,27 +73,29 @@ bhaskarsharan@Bhaskars-MacBook-Pro kafka_2.13-4.3.0 %
 
 6. describe a topic : kafka_2.13-4.3.0 % bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic order-events-topic
 
-7. stat producer && produce message : kafka_2.13-4.3.0 % bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic order-events-topic
+7. list all topics : docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --bootstrap-server broker-1:9092 --list
+
+8. stat producer && produce message : kafka_2.13-4.3.0 % bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic order-events-topic
 OR
 bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic order-events-topic --reader-property parse.key=true --reader-property key.separator=:
 (using the 2nd one, we can produce in a k-v manner)
 
-8. start consumer && consume message : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events --from-beginning --group order-events-consumer (in local terminal we would run this N times, to start N consumers)
+9. start consumer && consume message : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events --from-beginning --group order-events-consumer (in local terminal we would run this N times, to start N consumers)
 
-9. check which message went to which partition : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events-topic --from-beginning --formatter-property print.partition=true --formatter-property print.offset=true
+10. check which message went to which partition : kafka_2.13-4.3.0 % bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic order-events-topic --from-beginning --formatter-property print.partition=true --formatter-property print.offset=true
 
-10. check which partition is assigned to which consumer : kafka_2.13-4.3.0 % bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group order-events-topic-consumer
+11. check which partition is assigned to which consumer : kafka_2.13-4.3.0 % bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group order-events-topic-consumer
 
-11. A KRaft broker needs more than local storage initialization to become operational. During startup, it must register with the KRaft controller quorum and catch up with the cluster metadata. If the controller quorum is unavailable, the broker cannot complete startup and its broker listener is eventually shut down. Once the quorum becomes available, the broker can register, synchronize metadata, and become available to producers/consumers.
+12. A KRaft broker needs more than local storage initialization to become operational. During startup, it must register with the KRaft controller quorum and catch up with the cluster metadata. If the controller quorum is unavailable, the broker cannot complete startup and its broker listener is eventually shut down. Once the quorum becomes available, the broker can register, synchronize metadata, and become available to producers/consumers.
 
 An already-operational broker can continue serving certain existing data-plane operations even when the controller quorum becomes unavailable, because it already has the necessary partition/leader information locally.
 
-12. There is a chance that duplicate messages are logged in kafka logs. What might happen is, assume there is a event(E1) and it has a message (ABC), now ABC is in kafka log file at offset 1. The broker send back ack to producer but the ack fails. Now broker will hit a retry if it didn't get the ack. Hence the same event(E1) is send again and now the broker again appends the same message in logs, so eventually we have
+13. There is a chance that duplicate messages are logged in kafka logs. What might happen is, assume there is a event(E1) and it has a message (ABC), now ABC is in kafka log file at offset 1. The broker send back ack to producer but the ack fails. Now broker will hit a retry if it didn't get the ack. Hence the same event(E1) is send again and now the broker again appends the same message in logs, so eventually we have
 Broker-1.logs:
 E1 : offset 1
 E1 : offset 2
 
-13. There is also a message re-ordering condition that might happen in kafka. When we enable these settings : max.in.flight.requests.per.connection = N and retry > 0. For now, assume these batches have 1 event in them. What might happen is, assume there are multiple partition of record accumulator(batch-1, batch-2) which is being written in socket. Now assume batch-1 failed due to some issue but batch-2 succeeded(broker appended all events in logs files).
+14. There is also a message re-ordering condition that might happen in kafka. When we enable these settings : max.in.flight.requests.per.connection = N and retry > 0. For now, assume these batches have 1 event in them. What might happen is, assume there are multiple partition of record accumulator(batch-1, batch-2) which is being written in socket. Now assume batch-1 failed due to some issue but batch-2 succeeded(broker appended all events in logs files).
 Broker-1.logs:
 E2 : offset 1
 Now if the retry is configured and ack is not received then, the batch-1 will be again send from producer to broker. Now the overall ordering would be all events of batch-2 followed by all events of batch-1.
@@ -108,43 +110,39 @@ T:P0 → Batch 16KB ─┐
 T:P1 → Batch 12KB ─┼─→ Sender → ProduceRequest → Socket
 T:P2 → Batch 16KB ─┘
 
-               Overall Flow
-┌──────────────────────────────────────────────┐
-│       Spring Boot Application JVM            │
-│                                              │
-│  Your Controller / Service                   │
-│          │                                   │
-│          │ KafkaTemplate.send()              │
-│          ↓                                   │
-│     KafkaProducer                            │
-│          │                                   │
-│          ↓                                   │
-│    Serialization                             │
-│          │                                   │
-│          ↓                                   │
-│    RecordAccumulator                         │
-│       │   │   │                              │
-│       │   │   └── Batch → Topic-A/P2         │
-│       │   └────── Batch → Topic-A/P1         │
-│       └────────── Batch → Topic-A/P0         │
-│                    │                         │
-│                    ↓                         │
-│              Sender Thread                   │
-│                    │                         │
-│                    ↓                         │
-│              NetworkClient                   │
-│                    │                         │
-│                    ↓                         │
-│              TCP Socket                      │
-└────────────────────┼─────────────────────────┘
-                     │
-                     │ TCP connection
-                     ↓
-              ┌───────────────┐
-              │ Kafka Broker  │
-              └───────────────┘
+                                           Overall Flow
+                            ┌──────────────────────────────────────────────┐
+                            │        <Spring Boot Application JVM>         │
+                            │  Your Controller / Service                   │
+                            │          │ KafkaTemplate.send()              │
+                            │          ↓                                   │
+                            │     KafkaProducer                            │
+                            │          │                                   │
+                            │          ↓                                   │
+                            │    Serialization                             │
+                            │          │                                   │
+                            │          ↓                                   │
+                            │    RecordAccumulator                         │
+                            │       │   │   └── Batch → Topic-A/P2         │
+                            │       │   └────── Batch → Topic-A/P1         │
+                            │       └────────── Batch → Topic-A/P0         │
+                            │                    │                         │
+                            │                    ↓                         │
+                            │              Sender Thread                   │
+                            │                    │                         │
+                            │                    ↓                         │
+                            │              NetworkClient                   │
+                            │                    │                         │
+                            │                    ↓                         │
+                            │              TCP Socket                      │
+                            └────────────────────┼─────────────────────────┘
+                                                 │ TCP connection
+                                                 ↓
+                                          ┌───────────────┐
+                                          │ Kafka Broker  │
+                                          └───────────────┘
 
-13. What happens when spring.kafka.producer.properties.enable.idempotence=true is true?
+15. What happens when spring.kafka.producer.properties.enable.idempotence=true is true?
 Sender End:
 In producer, for each topic+partition a different batch is created in record-accumulator. Now when we enable this key, each producer gets a unique ID, this is the producerId(not stored anywhere). Now in each batch apart from events 3 additional details are added - PID, BaseSequence(the start sequence number of batch), LastSequence(The last number showing total events inserted till date).
 Receiver End:

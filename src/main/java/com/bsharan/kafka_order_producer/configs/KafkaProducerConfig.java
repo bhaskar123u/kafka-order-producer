@@ -25,7 +25,8 @@ public class KafkaProducerConfig {
                 .replicas(2)
                 .config(TopicConfig.RETENTION_MS_CONFIG,"604800000")
                 .config(TopicConfig.CLEANUP_POLICY_CONFIG,"delete")
-                .config(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG,"2") // for this topic, I require at least 2 replicas to be in the ISR for an acks=all write to succeed.
+                // for this topic, I require at least 2 replicas to be in the ISR for an acks=all write to succeed.
+                .config(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG,"2")
                 .config(TopicConfig.SEGMENT_BYTES_CONFIG,"104857600")
                 .build();
         // these same configs we can pass in /configs folder

@@ -1,0 +1,287 @@
+Problems :
+1. Duplicate message problem(Producer side): When a producer sends a message to a broker, Kafka assigns a ProducerId(PID) and sequence number to batches. These are used for idempotency and duplicate detection. But idempotency alone does not make multiple Kafka operations atomic. Also there is no way the PID is stored anywhere.
+
+2. Partial write problem(Producer side): Assume we have a use-case where writing to 3 different topics must happen at once, or none of them should happen. e.g.,
+
+                Producer
+                │
+                ├──► Topic A → SUCCESS
+                ├──► Topic B → SUCCESS
+                └──► Topic C → FAILURE ❌
+
+Now we have a partial write.
+Question: Can multiple Kafka writes be made atomic?
+
+3. Duplicate processing(Consumer side): Assume the consumer processed records successfully, but while committing the offsets an error occurred, afterward consumer crashes. When it starts again, Kafka only knows the last successfully committed offset, so already-processed records can be processed again.
+
+Solution : Kafka Transactions
+
+Kafka Transactions allow multiple Kafka operations to be treated as one atomic operation.
+
+Either:
+        All Kafka writes + offset commit → SUCCESS OR
+        All Kafka writes + offset commit → ABORTED
+
+Rules to be followed for kafka-transaction :
+1. A transactional producer needs a unique transactionId.
+2. If the producer application has multiple instances, each active instance must use a unique transactionId.
+3. The transactionId must remain stable for the same logical producer instance across restarts so that Kafka can identify and fence an old producer instance.
+4. Kafka internally associates the transactionId with a ProducerId(PID) and ProducerEpoch.
+
+Step 1 - Configure transactional producer
+spring.kafka.producer.transaction-id-prefix=order-serv-${HOSTNAME}-
+Spring uses this prefix to generate unique transaction IDs for producer instances e.g.,
+
+Producer Instance 1 : HOSTNAME = producer-1
+transactionId: order-serv-producer-1-0
+
+Producer Instance 2 : HOSTNAME = producer-2
+transactionId: order-serv-producer-2-0
+
+The important point is that two active producer instances should not use the same transactionId.
+
+Step 2 - Find Transaction Coordinator
+Kafka has an internal topic: __transaction_state. This topic stores transaction-related metadata. It has multiple partitions distributed across Kafka brokers.
+
+For a given transactionId:
+                transactionId
+                      │
+                      ▼
+                hash(transactionId)
+                      │
+                      ▼
+                __transaction_state partition
+                      │
+                      ▼
+                Broker hosting that partition
+                      │
+                      ▼
+                Transaction Coordinator
+
+The broker that is the leader of that __transaction_state partition becomes the Transaction Coordinator for that transactionId.
+Important: The Transaction Coordinator is a Kafka broker. It is not a separate special server.
+
+Step 3 - Get ProducerId and ProducerEpoch
+When the transactional producer initializes, it communicates with the Transaction Coordinator. The coordinator assigns/returns:
+                PID
+                ProducerEpoch
+e.g.,
+                transactionId = order-service-0
+                PID   = 5
+                Epoch = 0
+Kafka stores transaction metadata associated with the transactionId in `__transaction_state`. Conceptually:
+                transactionId : order-service-0
+
+                PID            : 5
+                Epoch          : 0
+                State          : Empty
+                Partitions     : []
+                Timeout        : 1000
+
+Partitions means the Kafka topic-partitions participating in the current transaction e.g.,
+                Partitions :
+                [
+                    (TopicA, Partition2),
+                    (TopicB, Partition1),
+                    (TopicC, Partition0)
+                ]
+
+The actual internal representation contains more metadata than this simplified example. Response from Transaction Coordinator:
+                PID   = 5
+                Epoch = 0
+When a new producer instance takes over the same transactionId, Kafka increases the ProducerEpoch e.g.,
+                Old producer:
+                PID = 5
+                Epoch = 0
+
+                New producer:
+                PID = 5
+                Epoch = 1
+
+The higher epoch fences the old producer.
+Producer fencing:
+
+Old Producer :
+                    PID=5
+                   Epoch=0
+                       │
+                       │ still tries to produce
+                       ▼
+                     Kafka ❌
+because:
+                Current Epoch = 1
+                Old Epoch     = 0
+
+This prevents two producer instances using the same transactionId from simultaneously producing.
+
+Step 4 - Begin Transaction
+Producer starts a transaction:
+                producer.beginTransaction();
+
+Kafka transaction state:
+                EMPTY
+                  │
+                  │ beginTransaction()
+                  ▼
+                ONGOING
+
+Now producer starts sending records e.g.,
+                Transaction
+
+                TopicA-P2
+                TopicB-P1
+                TopicC-P0
+The producer sends records with transactional information associated with them:
+                PID
+                Epoch
+                Topic
+                Partition
+                Record
+
+The records are written to the respective partition logs. Conceptually:
+                Producer
+                   ├────────► TopicA-P2
+                   ├────────► TopicB-P1
+                   └────────► TopicC-P0
+Kafka also tracks which topic-partitions are involved in the transaction e.g.,
+                Partitions Involved:
+
+                [
+                   (TopicA, P2),
+                   (TopicB, P1),
+                   (TopicC, P0)
+                ]
+
+Important correction: The Transaction Coordinator does NOT sit in the data path of every record. It coordinates the transaction, but the producer sends ProduceRequests directly to the brokers that are leaders of the target partitions.
+                 Transaction Coordinator
+                         │
+                    coordinates
+                         │
+                         ▼
+            Producer ───────────────► Broker A
+            Producer ───────────────► Broker B
+            Producer ───────────────► Broker C
+
+Step 5 - Commit Transaction
+Assume all records were successfully produced.
+Producer calls:
+                producer.commitTransaction();
+
+Kafka starts the commit protocol.Conceptually:
+                ONGOING
+                   │
+                   │ commitTransaction()
+                   ▼
+                PREPARE_COMMIT
+                   │
+                   │
+                   ▼
+                COMMIT
+The Transaction Coordinator records that the transaction is preparing to commit. Then it communicates with the brokers containing the partitions involved in the transaction. Each involved partition gets a transaction control record:
+
+Control Record:
+                PID   = 5
+                Epoch = 0
+                Commit = true
+
+Conceptually:
+                Transaction Coordinator
+                          │
+                          ├────────► Broker A → TopicA-P2 → COMMIT control record
+                          ├────────► Broker B → TopicB-P1 → COMMIT control record
+                          └────────► Broker C → TopicC-P0 → COMMIT control record
+Once the transaction is successfully completed, the producer receives success.
+
+Step 6 - Abort Transaction
+If something goes wrong:
+                producer.abortTransaction();
+State:
+                ONGOING
+                   │
+                   │ abortTransaction()
+                   ▼
+                PREPARE_ABORT
+                   │
+                   ▼
+                ABORT
+
+The involved brokers receive abort control records. Conceptually:
+                Transaction Coordinator
+                          │
+                          ├────────► Broker A → ABORT
+                          ├────────► Broker B → ABORT
+                          └────────► Broker C → ABORT
+
+The transaction's records are then not visible to consumers using:
+                isolation.level=read_committed
+
+Control Record : A control record is a special Kafka record written by Kafka to a partition to indicate the result of a transaction.
+
+It can indicate: COMMIT or ABORT
+
+It is different from a normal application record. Conceptually:
+                Partition Log
+
+                Offset 100 → Order A
+                Offset 101 → Order B
+                Offset 102 → Transaction Control Record → COMMIT
+The control record tells transactional consumers whether the records belonging to that transaction should be considered committed or aborted.
+
+Important : The transaction is not literally single-threaded at the Kafka cluster level.
+A producer instance has one transactional state, and Kafka requires transactional operations to follow the producer's transaction lifecycle correctly. But the producer can send records to multiple partitions/brokers as part of the same transaction.
+
+Overall flow : (Happy path ✅)
+                Producer
+                   │
+                   │ transactionId
+                   ▼
+                Transaction Coordinator
+                   │
+                   │ PID + Epoch
+                   ▼
+                beginTransaction()
+                   │
+                   ▼
+                ONGOING
+                   │
+                   ├────────► TopicA-P0
+                   ├────────► TopicB-P1
+                   └────────► TopicC-P2
+                   │
+                   ▼
+                commitTransaction()
+                   │
+                   ▼
+                PREPARE_COMMIT
+                   │
+                   ▼
+                Commit Control Records
+                   │
+                   ▼
+                COMMIT
+
+For abort:
+                ONGOING
+                   │
+                   ▼
+                abortTransaction()
+                   │
+                   ▼
+                PREPARE_ABORT
+                   │
+                   ▼
+                Abort Control Records
+                   │
+                   ▼
+                ABORT
+
+Kafka Transactions can atomically coordinate:
+                Kafka records
+                      +
+                Kafka consumer offsets
+
+But they do NOT automatically make:
+                MySQL transaction
+                      +
+                Kafka transaction
+one atomic transaction. That is where the Database + Kafka problem and Transactional Outbox become important.
