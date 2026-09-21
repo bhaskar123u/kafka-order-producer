@@ -1,10 +1,9 @@
 Problems :
-1. Duplicate message problem(Producer side): When a producer sends a message to a broker, Kafka assigns a ProducerId(PID) and sequence number to batches. These are used for idempotency and duplicate detection. But idempotency alone does not make multiple Kafka operations atomic. Also there is no way the PID is stored anywhere.
+1. Duplicate message problem(Producer side): When a producer sends a message to a broker, Kafka assigns a ProducerId(PID) and sequence number to batches. These are used for idempotency and duplicate detection. But idempotency alone does not make multiple Kafka operations atomic. Since there is no way the PID is stored, the PID changes after a broker re-starts.
 
 2. Partial write problem(Producer side): Assume we have a use-case where writing to 3 different topics must happen at once, or none of them should happen. e.g.,
 
                 Producer
-                │
                 ├──► Topic A → SUCCESS
                 ├──► Topic B → SUCCESS
                 └──► Topic C → FAILURE ❌
@@ -33,10 +32,10 @@ spring.kafka.producer.transaction-id-prefix=order-serv-${HOSTNAME}-
 Spring uses this prefix to generate unique transaction IDs for producer instances e.g.,
 
 Producer Instance 1 : HOSTNAME = producer-1
-transactionId: order-serv-producer-1-0
+                transactionId: order-serv-producer-1-0
 
 Producer Instance 2 : HOSTNAME = producer-2
-transactionId: order-serv-producer-2-0
+                transactionId: order-serv-producer-2-0
 
 The important point is that two active producer instances should not use the same transactionId.
 
@@ -45,17 +44,17 @@ Kafka has an internal topic: __transaction_state. This topic stores transaction-
 
 For a given transactionId:
                 transactionId
-                      │
-                      ▼
+                       │
+                       ▼
                 hash(transactionId)
-                      │
-                      ▼
+                       │
+                       ▼
                 __transaction_state partition
-                      │
-                      ▼
+                       │
+                       ▼
                 Broker hosting that partition
-                      │
-                      ▼
+                       │
+                       ▼
                 Transaction Coordinator
 
 The broker that is the leader of that __transaction_state partition becomes the Transaction Coordinator for that transactionId.
@@ -111,7 +110,6 @@ Old Producer :
 because:
                 Current Epoch = 1
                 Old Epoch     = 0
-
 This prevents two producer instances using the same transactionId from simultaneously producing.
 
 Step 4 - Begin Transaction
