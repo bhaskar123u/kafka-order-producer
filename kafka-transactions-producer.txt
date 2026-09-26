@@ -283,3 +283,239 @@ But they do NOT automatically make:
                       +
                 Kafka transaction
 one atomic transaction. That is where the Database + Kafka problem and Transactional Outbox become important.
+
+Kafka Producer :
+A KafkaProducer object is a self-contained producer client instance.
+It contains the state, configuration, buffers, and internal components
+needed to perform producer operations. Conceptually :
+
+                KafkaProducer instance
+                │
+                ├── Producer configuration
+                │     ├── bootstrap servers
+                │     ├── serializers
+                │     ├── acks
+                │     ├── retries
+                │     ├── idempotence
+                │     └── transaction settings
+                │
+                ├── RecordAccumulator
+                │     └── batches waiting to be sent
+                │
+                ├── Partitioner
+                │
+                ├── Metadata
+                │     └── topic → partition → leader information
+                │
+                ├── Network client
+                │     └── connections to brokers
+                │
+                ├── PID / Producer Epoch
+                │     └── idempotence / transactions
+                │
+                ├── Transaction state
+                │     └── current transaction state
+                │
+                └── Sender thread
+                      └── sends ProduceRequests to brokers
+
+Multiple KafkaProducer instances :
+                JVM
+                │
+                ├── KafkaProducer #1
+                │     ├── RecordAccumulator
+                │     ├── Metadata
+                │     ├── Network client
+                │     ├── Transaction state
+                │     └── Sender thread
+                │
+                └── KafkaProducer #2
+                      ├── RecordAccumulator
+                      ├── Metadata
+                      ├── Network client
+                      ├── Transaction state
+                      └── Sender thread
+
+Each KafkaProducer instance is an independent producer client.There is no fixed Kafka limit on the number of KafkaProducer instances in one JVM. The practical limit is based on JVM resources
+such as memory, CPU, threads and network connections.
+Transaction Rule :
+A single KafkaProducer instance can have only ONE active transaction
+at a time.
+                KafkaProducer #1
+                      │
+                      └── ONE active transaction
+
+                KafkaProducer #2
+                      │
+                      └── ONE active transaction
+Therefore :
+                JVM
+                 │
+                 ├── Producer #1 → Transaction T1
+                 │
+                 └── Producer #2 → Transaction T2
+T1 and T2 can be active concurrently because they belong to
+different KafkaProducer instances. Important : "One active transaction" is a per-KafkaProducer-instance rule, NOT a per-JVM rule.
+
+KafkaTemplate :
+When using Spring Kafka :
+
+                Application
+                     │
+                     │ kafkaTemplate.send(...)
+                     ▼
+                KafkaTemplate
+                     │
+                     ▼
+                ProducerFactory
+                     │
+                     ▼
+                KafkaProducer
+                     │
+                     ▼
+                RecordAccumulator
+                     │
+                     ▼
+                Sender thread
+                     │
+                     ▼
+                Kafka Broker
+
+KafkaTemplate is a Spring abstraction used to perform Kafka
+producer operations. KafkaTemplate is NOT itself the KafkaProducer. It obtains/uses KafkaProducer instances through the ProducerFactory e.g.,
+
+                KafkaTemplate<String, Order> kafkaTemplate;
+                kafkaTemplate.send("order-events",order.getId(),order);
+
+Multiple application threads can call the same KafkaTemplate :
+
+                HTTP request 1 ──┐
+                HTTP request 2 ──┤
+                HTTP request 3 ──┤
+                HTTP request 4 ──┤──► KafkaTemplate
+                HTTP request 5 ──┘          │
+                                            ▼
+                                     ProducerFactory
+                                            │
+                                            ▼
+                                     KafkaProducer(s)
+
+Non-Transactional KafkaTemplate :
+A call such as :
+
+                kafkaTemplate.send(...)
+
+does NOT mean that a new KafkaProducer is created for that call.The ProducerFactory manages/reuses KafkaProducer instances. Conceptually :
+                        send()
+                        ...
+                        send()
+                           │
+                           ▼
+                     KafkaProducer
+                           │
+                           ▼
+                   RecordAccumulator
+                           │
+                           ▼
+                      Batches
+                           │
+                           ▼
+                     Sender thread
+                           │
+                           ▼
+                        Broker
+The KafkaProducer can produce to many topics and many partitions for e.g.,
+
+                kafkaTemplate.send("order-events",order.getId(),order);
+                kafkaTemplate.send("payment-events",payment.getId(),payment);
+
+Both sends can use the same KafkaProducer instance.
+Kafka Record :
+
+                kafkaTemplate.send(topic, key, value)
+                              │
+                              ▼
+                        KafkaTemplate
+                              │
+                              ▼
+                        KafkaProducer
+                              │
+                              ├── serialize key/value
+                              ├── determine partition
+                              ├── add record to RecordAccumulator
+                              └── Sender thread
+                                      │
+                                      ▼
+                                    Broker
+
+The key is used by the partitioner to determine the partition (for the default partitioner, the key's serialized bytes are hashed and mapped to a partition).The producer can therefore have batches for multiple topic-partitions at the same time for e.g.,
+
+                        KafkaProducer
+                             │
+                             ▼
+                      RecordAccumulator
+                             │
+                  ┌──────────┼───────────┐
+                  ▼          ▼           ▼
+              orders-P0   orders-P1   payments-P0
+                Batch       Batch        Batch
+
+
+Batch vs Transaction : A BATCH and a TRANSACTION are different concepts
+Batch :
+    A group of records accumulated for efficient sending.
+    A batch belongs to a particular topic-partition.
+
+Transaction :
+    A logical atomic unit of Kafka operations.
+    A transaction can contain MANY batches across multiple topic-partitions and even multiple topics.
+e.g.,
+                        Transaction T1
+                             │
+                  ┌──────────┼──────────┐
+                  ▼          ▼          ▼
+              orders-P0  payments-P1  orders-P2
+                Batch       Batch       Batch
+
+These are separate batches, but all belong to the same transaction. Important mental model :
+
+                        KafkaTemplate
+                             │
+                             ▼
+                        KafkaProducer
+                             │
+                             ▼
+                      RecordAccumulator
+                             │
+                     ┌───────┼───────┐
+                     ▼       ▼       ▼
+                   Batch1   Batch2  Batch3
+                     │       │       │
+                     └───────┼───────┘
+                             │
+                        Kafka Broker
+
+In a NON-TRANSACTIONAL flow, these batches are independent. If a batch/write fails, that failure does NOT automatically make the other successful writes roll back for e.g.,
+
+                    Batch1 → SUCCESS
+                    Batch2 → FAILURE
+                    Batch3 → SUCCESS
+
+There is no transaction that atomically groups Batch1, Batch2 and Batch3 together.The producer may retry a failed batch depending on its configuration, but there is no atomic "all succeed or all fail"
+relationship between these batches. In a TRANSACTIONAL flow, a transaction adds another logical layer for e.g.,
+                      Transaction T1
+                             │
+                      ┌──────┼──────┐
+                      ▼      ▼      ▼
+                    Batch1  Batch2  Batch3
+                      │      │      │
+                      ▼      ▼      ▼
+                  Partition Partition Partition
+
+All these batches belong to the same logical transaction. Therefore :
+
+                    Batch1 → SUCCESS
+                    Batch2 → FAILURE
+                    Batch3 → SUCCESS
+
+does NOT result in Batch1 and Batch3 being committed independently while Batch2 fails. The transaction must successfully COMMIT for the transaction's records to become committed. If the transaction is ABORTED, the transactional records from the transaction are treated as aborted.
