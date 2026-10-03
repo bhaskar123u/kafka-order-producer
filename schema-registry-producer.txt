@@ -16,7 +16,7 @@ This doesn't get converted into normal POJO, it gets converted into something ve
 Q). Who will parse the above file into actual schema.
 Add dependency → <artifactId>kafka-avro-serializer</artifactId>, <artifactId>avro</artifactId>
 
-3. Everytime a producer calls .send(...) → avro-serializer → fetch schema(target folder) → generates a hash of this schema (hence order of variables matters) → if there is no schemaId(won't be there for the 1st time, it will do an http call to schema registry(subject: topic-name-key/topic-name-value, schema)), the registry will store this information in __schema topic in kafka)
+3. Everytime a producer calls .send(...) → avro-serializer → fetch schema(target folder) → generates a hash of this schema (hence order of variables matters) → if there is no schemaId(won't be there for the 1st time, it will do an http call to schema registry(subject: topic-name-key/topic-name-value, schema)), the registry will store this information in _schema topic in kafka)
 {
     schemaId: "", (unique)
     subject: "",
@@ -25,3 +25,25 @@ Add dependency → <artifactId>kafka-avro-serializer</artifactId>, <artifactId>a
     compatibility: ""
 }
 once stored, this generated unique-id is returned to avro-serializer. Avro-serializer puts this in a cache as <schema-hash : schemaID> → it will serialize this as [magic byte][schema ID][payload]. In this case, the payload is not in normal form, it is always in binary form and only value is there, no key(field), as it already have schemaID. With this approach memory is also saved. And now this data goes to kafka.
+
+Now if assume there is a schema change, from string to int or assume a new field is added by producer, then:
+                Schema changed
+                      │
+                      ▼
+                New schema
+                      │
+                      ▼
+                Schema Registry
+                      │
+                      ▼
+                Compatibility check
+                      │
+                   ┌──┴──┐
+                   │     │
+                 PASS   FAIL
+                   │     │
+                   ▼     ▼
+                New ID  SerializationException
+                   │
+                   ▼
+                Kafka
