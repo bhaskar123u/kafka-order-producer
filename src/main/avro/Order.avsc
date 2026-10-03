@@ -1,0 +1,34 @@
+{
+  "type": "record",
+  "name": "Order",
+  "namespace": "com.bsharan.kafka_order_producer.avro",
+  "fields": [
+    {
+      "name": "orderId",
+      "type": "string"
+    },
+    {
+      "name": "customerId",
+      "type": "string"
+    },
+    {
+      "name": "productId",
+      "type": "string"
+    },
+    {
+      "name": "quantity",
+      "type": ["null", "int"],
+      "default": null
+    },
+    {
+      "name": "totalAmount",
+      "type": ["null", "double"],
+      "default": null
+    },
+    {
+      "name": "status",
+      "type": ["null", "string"],
+      "default": null
+    }
+  ]
+}

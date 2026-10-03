@@ -1,6 +1,7 @@
 package com.bsharan.kafka_order_producer.serializer;
 
-import com.bsharan.kafka_order_producer.models.Order;
+// import com.bsharan.kafka_order_producer.models.Order;
+import com.bsharan.kafka_order_producer.avro.Order;
 import org.apache.kafka.common.serialization.Serializer;
 import tools.jackson.databind.ObjectMapper;
 

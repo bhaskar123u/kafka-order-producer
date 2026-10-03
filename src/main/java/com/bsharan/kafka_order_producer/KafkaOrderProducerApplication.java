@@ -12,5 +12,6 @@ public class KafkaOrderProducerApplication {
 
 }
 
+// compile fresh - mvn clean compile
 // start the application -> % ./mvnw spring-boot:run
 // start the application at a given port -> % ./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8081"

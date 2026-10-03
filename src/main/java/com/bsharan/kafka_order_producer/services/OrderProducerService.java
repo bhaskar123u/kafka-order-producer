@@ -1,6 +1,7 @@
 package com.bsharan.kafka_order_producer.services;
 
-import com.bsharan.kafka_order_producer.models.Order;
+// import com.bsharan.kafka_order_producer.models.Order;
+import com.bsharan.kafka_order_producer.avro.Order;
 import org.apache.kafka.common.errors.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -22,9 +23,9 @@ public class OrderProducerService {
     private KafkaTemplate<String, Order> kafkaTemplate;
 
     // picks values from configuration annotated with @Bean
-    @Autowired
-    @Qualifier("customSerializerKafkaTemplate")
-    private KafkaTemplate<String, Order> customSerializerKafkaTemplate;
+//    @Autowired
+//    @Qualifier("customSerializerKafkaTemplate")
+//    private KafkaTemplate<String, Order> customSerializerKafkaTemplate;
 
     private static final List<String> PRODUCT_IDS = IntStream.rangeClosed(1, 100)
             .mapToObj(i -> String.format("P%03d", i))
@@ -50,7 +51,8 @@ public class OrderProducerService {
     public void sendWithoutKey(Order order){
         String key = order.getOrderId();
 
-        CompletableFuture<SendResult<String, Order>> future = customSerializerKafkaTemplate.send("order-events",order);
+//        CompletableFuture<SendResult<String, Order>> future = customSerializerKafkaTemplate.send("order-events",order);
+        CompletableFuture<SendResult<String, Order>> future = kafkaTemplate.send("order-events",order);
 
         // whenever the sender thread sends response back from broker
         future.whenComplete((result, exception)->{
@@ -68,8 +70,10 @@ public class OrderProducerService {
 
         for (int i = 0; i < count; i++) {
             Order order = generateOrder();
+//            CompletableFuture<SendResult<String, Order>> future =
+//                    customSerializerKafkaTemplate.send("order-events", order);
             CompletableFuture<SendResult<String, Order>> future =
-                    customSerializerKafkaTemplate.send("order-events", order);
+                    kafkaTemplate.send("order-events", order);
             future.whenComplete((result, exception) -> {
                 // Successful send
                 if (exception == null) {
@@ -130,6 +134,7 @@ public class OrderProducerService {
                                  whenComplete()
     */
 
+    /*
     public Order generateOrder() {
         Order order = new Order();
         order.setOrderId(generateSixDigitNumber());
@@ -141,6 +146,19 @@ public class OrderProducerService {
         order.setTotalAmount((double) (Math.random() * 5000) + 100);
         order.setStatus("CREATED");
         return order;
+    }
+    */
+
+    public Order generateOrder() {
+        String productId = PRODUCT_IDS.get((int) (Math.random() * PRODUCT_IDS.size()));
+        return Order.newBuilder()
+                .setOrderId(generateSixDigitNumber())
+                .setCustomerId(generateAlphaNumeric(10))
+                .setProductId(productId)
+                .setQuantity((int) (Math.random() * 5) + 1)
+                .setTotalAmount((double) (Math.random() * 5000) + 100)
+                .setStatus("CREATED")
+                .build();
     }
 
     public String generateSixDigitNumber() {

@@ -161,7 +161,7 @@ When the batch is received, broker checks in it's in-memory map the next sequenc
         BaseSequence:3 (meaning this is not the 1st batch)
         LastSequence:4
         [E4:seq3, E5:seq4]
-If this is the case, then only batch is accepted. But if a producer re-starts, it will get a new ProducerId. Assume a case where ack was not received for a batch(the batch is already in logs). Also assume as soon as producer was trying to send the batch again, it crashed. The producer restart and a new producerId is assigned to it. Now this time the batch will be sent with almost all same data except PID and kafka will accept it a and write it in logs, even though they are duplicate events. This can be solved with 'transactions'. When we are using idempotency, we should make the
+If this is the case, then only batch is accepted. But if a producer re-starts, it will get a new ProducerId. Assume a case where ack was not received for a batch(the batch is already in logs). Also assume as soon as producer was trying to send the batch again, it crashed. The producer restart and a new producerId is assigned to it. Now this time the batch will be sent with almost all same data except PID and kafka will accept it a and write it in logs, even though they are duplicate events. This can be solved with 'transactions'.
 
 
 

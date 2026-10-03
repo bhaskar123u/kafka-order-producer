@@ -208,3 +208,13 @@ Start a consumer : docker exec -it kafka-broker-1 /opt/kafka/bin/kafka-console-c
 Describe a topic : docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --describe --topic order-events --bootstrap-server broker-1:9092
 
 Check actual log file, given a broker node and a topic : docker exec kafka-broker-1 find /tmp/kafka-logs -type f -path '*/order-events-*/*.log'
+
+Start schema-registry :
+docker run -d \
+  --name schema-registry \
+  --network kafka_kafka-net \
+  -p 8081:8081 \
+  -e SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=PLAINTEXT://kafka-broker-1:9092,PLAINTEXT://kafka-broker-2:9092 \
+  -e SCHEMA_REGISTRY_HOST_NAME=schema-registry \
+  -e SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
+  confluentinc/cp-schema-registry:8.3.2

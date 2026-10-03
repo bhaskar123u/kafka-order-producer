@@ -1,6 +1,7 @@
 package com.bsharan.kafka_order_producer.controllers;
 
-import com.bsharan.kafka_order_producer.models.Order;
+// import com.bsharan.kafka_order_producer.models.Order;
+import com.bsharan.kafka_order_producer.avro.Order;
 import com.bsharan.kafka_order_producer.services.OrderProducerService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
