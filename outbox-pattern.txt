@@ -1,0 +1,77 @@
+Problem: DUAL WRITE
+Assume we have a method as below
+        @PostMapping("/api/orders")
+        public ResponseEntity<String> createOrder(@RequestBody Order order){
+            // step 1
+            orderRepository.save(order);
+            // step 2
+            kafkaTemplate.send("order-events", order.getOrderId(), order);
+            return ResponseEntity.ok("order-created");
+        }
+Issue:
+Assume if the DB write/Kafka write fails, the other can still proceed as these two are 2 separate independent system. Is it not guaranteed that these two are atomic.
+
+Solution:
+1. @Transactional + Manual exception throw
+@Transactional
+public void createOrder(OrderRequest request){
+    orderRepository.save(order);
+    try{
+        kafkaTemplate.send("order-event",event).get();
+    } catch(Exception e){
+        throw new RuntimeException("kafka failed, rolling back DB transaction");
+    }
+}
+Assume the ack received failed due to network issue and exception was thrown, then the record will not be in DB, but it will be in kafka.
+
+2. Two phase commit
+For two phase to work, all the participant need to understand this protocol. So it won't work here.
+
+3. Outbox pattern:
+Write to db first, then a separate process(polling/CDC) reads from DB and publish to kafka.
+@Transactional
+public void createOrder(OrderRequest request){
+    orderRepository.save(order);
+    orderOutboxRepository.save(order);
+}
+Order Repository Schema: {id, aggregate-type(topic), event-type(order-created), aggregate-id, payload, created-at, is-published}
+
+i) Polling: A typical poller looks like
+@Component
+public class OrderPoller{
+    @Autowired
+    private OutboxRepository outboxRepository;
+
+    @Autowired
+    private kakfaTemplate<String, String> kafkaTemplate;
+
+    @Value("${outbox.polling.batch-size}")
+    private int batchSize;
+
+    @Scheduled(fixedRateString="${outbox.polling.interval-ms}")
+    @Transactional
+    public void pollAndPublish(){
+        List<OutboxEvent> events = outboxRepository.findUnpublishedEvents(batchSize);
+        // the query can look like
+        // select * from outbox-events where published=false order by createdAt ASC LIMIT :batchSize
+        if(events.isEmpty()){
+            return;
+        }
+        for(OutboxEvent event: events){
+            try{
+                String topic = ...
+                kafkaTemplate.send(topic, event.getAggregateId(), event.getPayload().get());
+                event.setPublished(true);
+                event.serPublishedAt(Instant.now());
+                outboxRepository.save(event);
+            } catch(Exception e){
+                // this is needed, assume event-1 failed, then 2,3 should also not go ahead
+                break;
+            }
+        }
+    }
+}
+Issues with polling:
+Multi-instance handling, assume we have 3 job-service running, anyone can pick any set of 10 rows, assume in some of them the event is published but in some it got failed, then there is an order mismatch. So the query need to be something like select ... for update skip locked. Then there is always a polling gap, constant DB check, DB cleanup needed, chances of duplicate processing.
+
+ii) CDC: Change data capture, debezium tool is used.

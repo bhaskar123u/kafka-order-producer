@@ -35,6 +35,14 @@ public class OrderProducerService {
         String key = order.getOrderId();
 
         CompletableFuture<SendResult<String, Order>> future = kafkaTemplate.send("order-events",key,order);
+        /*
+        CompletableFuture
+          └── SendResult
+                ├── ProducerRecord (what was sent)
+                │     └── topic, key, value
+                └── RecordMetadata (what was received)
+                      └── topic, partition, offset, timestamp
+         */
 
         // whenever the sender thread sends response back from broker
         future.whenComplete((result, exception)->{
