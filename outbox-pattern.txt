@@ -1,77 +1,155 @@
 Problem: DUAL WRITE
-Assume we have a method as below
-        @PostMapping("/api/orders")
-        public ResponseEntity<String> createOrder(@RequestBody Order order){
-            // step 1
-            orderRepository.save(order);
-            // step 2
-            kafkaTemplate.send("order-events", order.getOrderId(), order);
-            return ResponseEntity.ok("order-created");
-        }
+
+Assume we have a method as below:
+
+    @PostMapping("/api/orders")
+    public ResponseEntity<String> createOrder(@RequestBody Order order) {
+        // step 1
+        orderRepository.save(order);
+        // step 2
+        kafkaTemplate.send("order-events", order.getOrderId(), order);
+        return ResponseEntity.ok("order-created");
+    }
+
 Issue:
-Assume if the DB write/Kafka write fails, the other can still proceed as these two are 2 separate independent system. Is it not guaranteed that these two are atomic.
+DB and Kafka are two independent systems. If one write succeeds and the other fails, the system can end up in an inconsistent state. Both writes are not atomic by default.
 
 Solution:
-1. @Transactional + Manual exception throw
-@Transactional
-public void createOrder(OrderRequest request){
-    orderRepository.save(order);
-    try{
-        kafkaTemplate.send("order-event",event).get();
-    } catch(Exception e){
-        throw new RuntimeException("kafka failed, rolling back DB transaction");
-    }
-}
-Assume the ack received failed due to network issue and exception was thrown, then the record will not be in DB, but it will be in kafka.
+1. @Transactional + Manual Exception Throw
 
-2. Two phase commit
-For two phase to work, all the participant need to understand this protocol. So it won't work here.
-
-3. Outbox pattern:
-Write to db first, then a separate process(polling/CDC) reads from DB and publish to kafka.
-@Transactional
-public void createOrder(OrderRequest request){
-    orderRepository.save(order);
-    orderOutboxRepository.save(order);
-}
-Order Repository Schema: {id, aggregate-type(topic), event-type(order-created), aggregate-id, payload, created-at, is-published}
-
-i) Polling: A typical poller looks like
-@Component
-public class OrderPoller{
-    @Autowired
-    private OutboxRepository outboxRepository;
-
-    @Autowired
-    private kakfaTemplate<String, String> kafkaTemplate;
-
-    @Value("${outbox.polling.batch-size}")
-    private int batchSize;
-
-    @Scheduled(fixedRateString="${outbox.polling.interval-ms}")
     @Transactional
-    public void pollAndPublish(){
-        List<OutboxEvent> events = outboxRepository.findUnpublishedEvents(batchSize);
-        // the query can look like
-        // select * from outbox-events where published=false order by createdAt ASC LIMIT :batchSize
-        if(events.isEmpty()){
-            return;
+    public void createOrder(OrderRequest request) {
+        orderRepository.save(order);
+        try {
+            kafkaTemplate.send("order-events", event).get();
+        } catch (Exception e) {
+            throw new RuntimeException("Kafka failed, rolling back DB transaction", e);
         }
-        for(OutboxEvent event: events){
-            try{
-                String topic = ...
-                kafkaTemplate.send(topic, event.getAggregateId(), event.getPayload().get());
-                event.setPublished(true);
-                event.serPublishedAt(Instant.now());
-                outboxRepository.save(event);
-            } catch(Exception e){
-                // this is needed, assume event-1 failed, then 2,3 should also not go ahead
-                break;
+    }
+
+Assume the DB write succeeds, but the Kafka record is stored and its acknowledgment is lost due to a network issue. The producer receives an exception, and the DB transaction rolls back. The result is that the record may exist in Kafka but not in the DB. This approach does not guarantee atomicity across DB and Kafka.
+
+2. Two-Phase Commit (2PC)
+
+For 2PC to work, all participants must support the protocol and participate in the same distributed transaction. A typical database transaction and Kafka transaction are not automatically coordinated by the code above. Therefore, @Transactional + KafkaTemplate.send() does not provide 2PC.
+
+3. Outbox Pattern
+
+Write the business data and an event record to the same database in a single DB transaction. A separate process reads the outbox and publishes events to Kafka.
+
+    @Transactional
+    public void createOrder(OrderRequest request) {
+        orderRepository.save(order);
+        orderOutboxRepository.save(outboxEvent);
+    }
+
+Both writes happen in the same database transaction, so they either both commit or both roll back.
+Outbox Table Schema:
+{id, aggregate_type, event_type, aggregate_id, payload, created_at, published, published_at}
+
+How do we then make sure that the event is processed later, we have a couple of ways:
+i) Polling
+A typical poller looks like:
+    @Component
+    public class OrderPoller {
+        @Autowired
+        private OutboxRepository outboxRepository;
+        @Autowired
+        private KafkaTemplate<String, String> kafkaTemplate;
+        @Value("${outbox.polling.batch-size}")
+        private int batchSize;
+
+        @Scheduled(fixedRateString = "${outbox.polling.interval-ms}")
+        public void pollAndPublish() {
+            List<OutboxEvent> events =
+                    outboxRepository.findUnpublishedEvents(batchSize);
+            // query added in findUnpublishedEvents
+            // SELECT * FROM outbox_events WHERE published = false ORDER BY created_at ASC LIMIT :batchSize
+            if (events.isEmpty()) {
+                return;
+            }
+            for (OutboxEvent event : events) {
+                try {
+                    kafkaTemplate.send(
+                            event.getAggregateType(),
+                            event.getAggregateId(),
+                            event.getPayload()
+                    ).get();
+                    event.setPublished(true);
+                    event.setPublishedAt(Instant.now());
+                    outboxRepository.save(event);
+                } catch (Exception e) {
+                    // Stop processing this batch after a failure. Later events should not overtake the failed event when ordering is required.
+                    break;
+                }
             }
         }
     }
-}
-Issues with polling:
-Multi-instance handling, assume we have 3 job-service running, anyone can pick any set of 10 rows, assume in some of them the event is published but in some it got failed, then there is an order mismatch. So the query need to be something like select ... for update skip locked. Then there is always a polling gap, constant DB check, DB cleanup needed, chances of duplicate processing.
 
-ii) CDC: Change data capture, debezium tool is used.
+Important:
+- Wait for the Kafka send result before marking the event as published.
+- If Kafka stores the record but the acknowledgment is lost, the poller may retry and publish a duplicate.
+- Consumers should be idempotent, or duplicate handling must be implemented.
+- Marking an event as published must be committed to the DB. A crash between Kafka publication and the DB update can cause a duplicate on retry.
+
+Issues with polling:
+- Multi-instance handling: if three service instances poll simultaneously, they may select overlapping rows unless rows are claimed/locked correctly.
+- Use a transaction and a query such as `SELECT ... FOR UPDATE SKIP LOCKED` to allow workers to claim different rows. The locks must remain valid while the rows are claimed or processed; do not hold long DB transactions open while waiting on Kafka without considering the impact.
+- Ordering: parallel workers or multiple batches can publish later events before earlier ones. Ordering requirements may need per-aggregate sequencing or partitioning.
+- Polling delay: events are published only when a poll runs.
+- Constant DB checks even when no events are available.
+- Published rows need a cleanup/retention strategy.
+- Duplicate publication is possible if the process crashes after Kafka accepts an event but before the DB marks it as published.
+
+ii) CDC (Change Data Capture)
+
+Use a CDC tool such as Debezium to capture committed changes to the outbox table from the database transaction log and publish them to Kafka.
+
+Flow:
+                ┌─────────────────────────────────────┐
+                │          Application Service        │
+                │  ┌───────────────────────────────┐  │
+                │  │       DB Transaction          │  │
+                │  │  1. Save Order                │  │
+                │  │  2. Save Outbox Event         │  │
+                │  │  3. COMMIT                    │  │
+                │  └───────────────┬───────────────┘  │
+                └──────────────────┼──────────────────┘
+                                   │
+                                   ▼
+                ┌─────────────────────────────────────┐
+                │              Database               │
+                │  ┌───────────────────────────────┐  │
+                │  │       Orders Table            │  │
+                │  └───────────────────────────────┘  │
+                │  ┌───────────────────────────────┐  │
+                │  │       Outbox Table            │  │
+                │  └───────────────────────────────┘  │
+                │                   │                 │
+                │                   ▼                 │
+                │  ┌───────────────────────────────┐  │
+                │  │   Transaction Log (WAL/binlog)│  │
+                │  └───────────────┬───────────────┘  │
+                └──────────────────┼──────────────────┘
+                                   │  CDC
+                                   ▼
+                ┌─────────────────────────────────────┐
+                │              Debezium               │
+                │  Reads committed DB changes         │
+                │  Captures outbox events             │
+                └──────────────────┬──────────────────┘
+                                   │
+                                   │ Publishes events
+                                   ▼
+                ┌─────────────────────────────────────┐
+                │            Kafka Cluster            │
+                │  Topic: order-events                │
+                └─────────────────────────────────────┘
+
+Advantages:
+- No frequent polling queries against the outbox table.
+- Reads committed database changes from the transaction log.
+- Lower publication latency than periodic polling, depending on configuration.
+- The application does not need to mark each event as published; retention and cleanup can be managed separately.
+
+CDC still requires handling duplicate delivery and ordering requirements appropriately.
