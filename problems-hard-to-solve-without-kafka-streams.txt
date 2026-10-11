@@ -1,0 +1,312 @@
+KAFKA STREAMS — PROBLEM SCENARIOS
+==================================================================
+
+1. REAL-TIME ORDER AGGREGATION
+------------------------------
+Scenario:
+Calculate the total amount spent by each customer continuously.
+
+Topic/DB info:
+- orders-topic: orderId, customerId, amount
+- MySQL: customer and order details
+
+Normal approach:
+1. Consume events from orders-topic.
+2. Group orders by customerId.
+3. Update a running total in MySQL or Redis.
+4. Publish updated totals to customer-totals-topic.
+
+Issues with this approach for scaling:
+- Every event may trigger database reads/writes, creating a bottleneck.
+- Concurrent consumers processing the same customer can cause race conditions or lost updates.
+- Processing an event twice can count it twice unless updates are idempotent.
+- Maintaining and recovering intermediate aggregation state is our responsibility.
+
+Kafka Streams concepts:
+groupByKey(), aggregate(), state stores, changelog topics.
+
+
+2. JOINING EVENTS FROM TWO TOPICS
+---------------------------------
+Scenario:
+Enrich every order with customer details before sending it downstream.
+
+Topic/DB info:
+- orders-topic: orderId, customerId, amount
+- customers-topic: customerId, name, city, tier
+
+Normal approach:
+1. Consume both topics.
+2. Store customer details in a local cache or database.
+3. When an order arrives, look up its customer.
+4. If customer details are missing, retry or hold the order.
+5. Publish the enriched order.
+
+Issues with this approach for scaling:
+- The order may arrive before the customer record.
+- Local caches across instances must be synchronized.
+- Customer updates must be propagated correctly.
+- A database lookup for every order can become expensive.
+- Buffering, retries, synchronization, and recovery must be implemented.
+
+Kafka Streams concepts:
+KStream, KTable, stream-table joins, table-table joins.
+
+
+3. REAL-TIME SALES DASHBOARD (TIME WINDOWS)
+-------------------------------------------
+Scenario:
+Calculate total sales for every five-minute interval.
+
+Topic/DB info:
+- orders-topic: orderId, amount, timestamp
+- Output: sales-summary-topic
+
+Normal approach:
+1. Consume order events.
+2. Maintain the current five-minute total.
+3. Manage window boundaries.
+4. Publish the total when the interval closes.
+5. Handle late or out-of-order events.
+
+Issues with this approach for scaling:
+- Window boundaries and timers must be managed.
+- Events can arrive late due to network or upstream delays.
+- Restarts must not lose partial window totals.
+- A policy is needed for late events: ignore, update, or correct results.
+- Managing many active windows becomes complicated.
+
+Kafka Streams concepts:
+Tumbling, hopping and sliding windows; grace periods; windowed aggregation.
+
+
+4. MAINTAINING THE LATEST STATE OF AN ENTITY
+--------------------------------------------
+Scenario:
+Build a live order-status service that exposes the latest status of every order.
+
+Topic/DB info:
+- order-status-topic: orderId, status, timestamp
+- Example: CREATED -> PAID -> SHIPPED -> DELIVERED
+
+Normal approach:
+1. Consume status events.
+2. Store the latest status in a database or cache.
+3. Replace the previous status when a new event arrives.
+4. Expose the latest status through an API.
+
+Issues with this approach for scaling:
+- Multiple instances may maintain inconsistent local copies.
+- Out-of-order events may overwrite newer status unless version/order checks exist.
+- Database writes can become expensive at high volume.
+- Rebuilding cache state after data loss requires replaying events.
+- State recovery and synchronization add operational work.
+
+Kafka Streams concepts:
+KTable, keyed records, state stores, changelog topics.
+
+Note:
+Kafka Streams does not automatically know which event is logically newest.
+Define ordering/version/timestamp rules.
+
+
+5. DETECTING DUPLICATE TRANSACTIONS
+-----------------------------------
+Scenario:
+Prevent duplicate payment events from being counted twice in analytics.
+
+Topic/DB info:
+- payments-topic: transactionId, customerId, amount
+- MySQL: processed transaction IDs
+
+Normal approach:
+1. Consume payment events.
+2. Check whether transactionId was already processed.
+3. If new, update the total and publish the result.
+4. Record the transaction ID as processed.
+
+Issues with this approach for scaling:
+- A database lookup for every event increases load and latency.
+- Two instances may check the same ID simultaneously and both process it.
+- A crash between updating the total and recording the ID creates inconsistency.
+- Deduplication state grows unless retention is defined.
+
+Kafka Streams concepts:
+State stores, windowed deduplication, transactional processing.
+
+Note:
+Kafka Streams does not automatically deduplicate arbitrary business events forever.
+Define the key and retention period. Exactly-once processing does not automatically
+make external database side effects exactly-once.
+
+
+6. REAL-TIME FRAUD DETECTION
+----------------------------
+Scenario:
+Flag customers making more than five transactions within one minute.
+
+Topic/DB info:
+- payments-topic: transactionId, customerId, amount, timestamp
+- Optional: customer-risk-topic
+
+Normal approach:
+1. Consume payment events.
+2. Store recent transactions for each customer.
+3. Count transactions within the last minute.
+4. Check customer risk information.
+5. Publish suspicious transactions to fraud-alerts-topic.
+
+Issues with this approach for scaling:
+- Time-based state must be maintained for every customer.
+- State size grows with event volume and retention duration.
+- Instances must process each customer's events consistently.
+- Late or duplicate events can affect counts.
+- Restarting requires restoring recent transaction history.
+
+Kafka Streams concepts:
+Windowed aggregation, state stores, joins, repartitioning.
+
+
+7. COMBINING TOPICS FOR BUSINESS ANALYTICS
+------------------------------------------
+Scenario:
+Calculate revenue by product category using order and product information.
+
+Topic/DB info:
+- orders-topic: orderId, productId, quantity, price
+- products-topic: productId, category
+- Output: category-revenue-topic
+
+Normal approach:
+1. Consume orders and product updates.
+2. Maintain a product-to-category lookup.
+3. Enrich orders with categories.
+4. Calculate revenue for each category.
+5. Publish updated totals.
+
+Issues with this approach for scaling:
+- Product lookup data must be synchronized across instances.
+- Product updates can make historical revenue calculations ambiguous.
+- Missing product data and retries must be handled.
+- Large joins and aggregations can overload the database.
+- Recovery requires reconstructing lookup and aggregate state.
+
+Kafka Streams concepts:
+KTable, stream-table joins, groupBy(), aggregate().
+
+
+8. FILTERING AND ROUTING EVENTS
+-------------------------------
+Scenario:
+Send high-value orders to a priority topic and normal orders to a regular topic.
+
+Topic/DB info:
+- orders-topic: orderId, amount, customerTier
+- Outputs: priority-orders-topic, normal-orders-topic
+
+Normal approach:
+1. Consume orders.
+2. Evaluate business rules.
+3. Publish each order to the appropriate topic.
+4. Commit the consumed offset.
+
+Issues with this approach for scaling:
+- A crash between publishing and committing may create duplicate output.
+- Consumers need correct partition assignment and offset handling.
+- More routing rules can make the consumer application harder to maintain.
+- Rules using reference data require data consistency management.
+
+Kafka Streams concepts:
+filter(), branch(), to(), Kafka transactions.
+
+Note:
+Simple filtering/routing is easy with a normal consumer. Kafka Streams is more useful
+when building composable pipelines with state and processing guarantees.
+
+
+9. MAINTAINING ROLLING METRICS
+------------------------------
+Scenario:
+Calculate each customer's average order value over the last 30 minutes.
+
+Topic/DB info:
+- orders-topic: orderId, customerId, amount, timestamp
+- Output: customer-average-topic
+
+Normal approach:
+1. Store each customer's recent orders.
+2. Remove orders older than 30 minutes.
+3. Calculate the average.
+4. Publish updated values continuously.
+
+Issues with this approach for scaling:
+- Old records must expire at the right time.
+- Keeping every event in memory can be expensive.
+- Recalculating averages repeatedly wastes CPU.
+- Restart recovery requires restoring retained events or equivalent aggregate state.
+- Out-of-order and late events complicate the rolling window.
+
+Kafka Streams concepts:
+Sliding windows, windowed aggregation, state stores.
+
+
+10. REPROCESSING AND REBUILDING DERIVED DATA
+--------------------------------------------
+Scenario:
+A bug in revenue calculation is fixed, and revenue summaries must be rebuilt
+from historical events.
+
+Topic/DB info:
+- orders-topic: retained order events
+- category-revenue-topic: derived revenue totals
+- Optional database: dashboard values
+
+Normal approach:
+1. Reset consumer offsets or create a new consumer group.
+2. Replay historical events.
+3. Recalculate totals.
+4. Replace or reconcile existing output.
+5. Ensure live events do not mix incorrectly with replayed events.
+
+Issues with this approach for scaling:
+- Replaying millions of events can take a long time.
+- Replay and live processing can overlap and produce incorrect totals.
+- Reusing an output topic can mix old and rebuilt results.
+- Database writes and downstream side effects may be duplicated.
+- State reset, replay, and cutover must be coordinated.
+
+Kafka Streams concepts:
+Application state restoration, changelog topics, application IDs, controlled replay
+and output strategies.
+
+Note:
+Kafka Streams helps with state restoration and replay, but a safe business-level
+rebuild/cutover procedure still needs to be designed.
+
+
+SUMMARY — PROBLEMS AND KAFKA STREAMS CONCEPTS
+==============================================================================
+- Transform and route events: stateless operations
+- Maintain running totals: aggregations and state stores
+- Join events and reference data: KStream and KTable joins
+- Process events over time: windowing
+- Recover local state: changelog topics
+- Distribute keyed processing: partitions and tasks
+- Avoid duplicate Kafka output: processing guarantees and transactions
+- Rebuild derived state: replay and restoration
+
+Important:
+Kafka Streams is a Java library for stream processing, not a replacement for Kafka
+brokers or databases. It simplifies stateful distributed processing, but correct
+keys, partitioning, serialization, business ordering, retention, and external side
+effects still need deliberate design.
+
+Suggested learning order:
+1. KStream vs KTable
+2. Stateless operations
+3. groupByKey() and aggregations
+4. State stores and changelog topics
+5. Windowing and late events
+6. Stream-stream and stream-table joins
+7. Partitions, tasks, and parallelism
+8. Recovery and processing guarantees

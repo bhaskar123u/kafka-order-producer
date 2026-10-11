@@ -1,0 +1,175 @@
+What is kafka stream?
+A jar file. A client library for building stream processing application on top of kafka.
+
+Topology:
+It is a logical flow of how data moves and get processed from source to sink topics. It is like a DAG, data flow in one direction. We define this topology once in start and it runs forever.
+i. Linear topology:
+            ┌──────────────┐
+            │    Source    │
+            └──────┬───────┘
+                   ▼
+            ┌──────────────┐
+            │    Filter    │
+            └──────┬───────┘
+                   ▼
+            ┌──────────────┐
+            │     Map      │
+            └──────┬───────┘
+                   ▼
+            ┌──────────────┐
+            │     Sink     │
+            └──────────────┘
+ii. Branching topology:
+                           ┌──────────────────┐       ┌──────────────┐
+                      ┌───▶│     Filter-1     │──────▶│    Sink-1    │
+                      │    └──────────────────┘       └──────────────┘
+            ┌────────┐│
+            │ Source ├┤
+            └────────┘│
+                      │    ┌──────────────────┐       ┌──────────────┐
+                      └───▶│     Filter-2     │──────▶│    Sink-2    │
+                           └──────────────────┘       └──────────────┘
+iii. Multi-Source join topology:
+            ┌──────────────┐
+            │   Source-1   │──────┐
+            └──────────────┘      │
+                                  ▼
+                            ┌──────────────┐       ┌──────────────┐
+                            │     Join     │──────▶│     Sink     │
+                            └──────────────┘       └──────────────┘
+                                  ▲
+            ┌──────────────┐      │
+            │   Source-2   │──────┘
+            └──────────────┘
+Tasks:
+A task is the unit of work in Kafka Streams that processes records from assigned Kafka topic partitions by executing the topology's processing logic. Kafka Streams creates tasks based on the input topic partitions and the topology's partitioning requirements. Each task executes the same logical processing steps but processes records from its own assigned partitions.
+            ┌───────────────────────────────┐
+            │          orders-topic         │
+            └───────────────┬───────────────┘
+                ┌───────────┼──────────┐
+                │           │          │
+                ▼           ▼          ▼
+            ┌────────┐  ┌────────┐ ┌────────┐
+            │   P0   │  │   P1   │ │   P2   │
+            └───┬────┘  └───┬────┘ └───┬────┘
+                ▼           ▼          ▼
+            ┌────────┐  ┌────────┐ ┌────────┐
+            │ Task-0 │  │ Task-1 │ │ Task-2 │
+            └────────┘  └────────┘ └────────┘
+
+Repartitioning in kafka:
+Kafka Streams determines whether repartitioning is required based on the topology's operations and existing partitioning. For example, if orders-topic is keyed by orderId, but we want to aggregate by customerId, selectKey() changes the key but does not move records between partitions. Kafka Streams may create an internal repartition topic so that records with the same customerId reach the same partition.
+                    ┌──────────────────┐
+                    │  orders-topic    │
+                    │  Key: orderId    │
+                    └────────┬─────────┘
+                             ▼
+                    ┌──────────────────┐
+                    │ selectKey()      │
+                    │ Key: customerId  │
+                    └────────┬─────────┘
+                             ▼
+                    ┌──────────────────┐
+                    │ Repartition Topic│
+                    └────────┬─────────┘
+                             ▼
+                    ┌──────────────────┐
+                    │ Aggregate by     │
+                    │ customerId       │
+                    └──────────────────┘
+Repartitioning depends on key and partitioning requirements, not the number of events per second. If the existing partitioning is already suitable, Kafka Streams may not need repartitioning.
+
+Is Kafka Streams Stateless?
+Kafka Streams is NOT stateless by default.
+
+It supports both:
+- Stateless processing
+- Stateful processing
+
+Stateless Processing
+Meaning:
+The output depends only on the current record, not on previously processed records.
+
+Example:
+Filter orders where amount > 1000.
+
+Flow:
+            orders-topic
+                |
+                v
+            Kafka Streams
+                |
+                v
+            filter(amount > 1000)
+                |
+                v
+            high-value-orders-topic
+
+Code:
+            KStream<String, Order> orders = builder.stream("orders-topic");
+            orders.filter((key, order) -> order.getAmount() > 1000)
+                  .to("high-value-orders-topic");
+
+Example:
+Order A: ₹500  -> Discard
+Order B: ₹2000 -> Forward
+Order C: ₹800  -> Discard
+
+Each order is processed independently. Common stateless operations:
+    - filter()
+    - map()
+    - mapValues()
+    - selectKey()
+
+Stateful Processing
+Meaning:
+The output depends on the current record and previously processed records.
+
+Example:
+Calculate the total amount spent by each customer.
+
+Flow:
+            orders-topic
+                |
+                v
+            Kafka Streams
+                |
+                v
+            Group by customerId
+                |
+                v
+            Maintain running total
+                |
+                v
+            customer-totals-topic
+
+Input:
+Customer A -> ₹100
+Customer B -> ₹200
+Customer A -> ₹300
+
+Output:
+Customer A -> ₹400
+Customer B -> ₹200
+
+Kafka Streams must remember the previous total for each customer. It maintains this information in a STATE STORE. Common stateful operations:
+    - count()
+    - aggregate()
+    - reduce()
+    - Windowed aggregations
+    - Joins involving KTable state
+
+Where Is the State Stored?
+Kafka Streams commonly maintains state in local state stores on the machine running the application. For fault recovery, state-store updates can be backed by
+Kafka changelog topics.
+
+Example:
+            Kafka Streams instance
+                |
+                +--> Local state store
+                |
+                +--> Kafka changelog topic
+
+If an instance fails, another instance can restore the state from the changelog topic, subject to the topology configuration.
+
+

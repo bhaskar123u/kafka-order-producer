@@ -188,16 +188,15 @@ When the spring-application starts, then what happens
        Topic metadata
        is stored in
        Kafka cluster
-                    │
-                    ▼
-             Application
-             finishes startup
-                    │
-                    ▼
-          Application READY
-                    │
-                    ▼
-          First API request
+                │
+                ▼
+       Application finishes startup
+                │
+                ▼
+       Application READY
+                │
+                ▼
+       First API request
 
 Execute kafka commands in container : docker exec kafka-broker-1 /opt/kafka/bin/kafka-topics.sh --list --bootstrap-server broker-1:9092
 
