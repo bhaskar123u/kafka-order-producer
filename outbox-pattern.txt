@@ -101,9 +101,11 @@ Issues with polling:
 - Published rows need a cleanup/retention strategy.
 - Duplicate publication is possible if the process crashes after Kafka accepts an event but before the DB marks it as published.
 
-ii) CDC (Change Data Capture)
+ii) CDC (Change Data Capture):
+Don't repeatedly ask the database for changes; capture changes as they happen. Use a CDC tool such as Debezium to capture committed changes to the outbox table from the database transaction log and publish them to Kafka.
 
-Use a CDC tool such as Debezium to capture committed changes to the outbox table from the database transaction log and publish them to Kafka.
+Core technique:
+During Master-Slave replication, the database can send transaction-log changes from the master to the slave. Debezium uses a similar underlying mechanism. It connects to the database and reads changes from its transaction log using the database's replication protocol. For example, with Postgres, Debezium reads changes from the Write-Ahead Log (WAL) through logical replication.
 
 Flow:
                 ┌─────────────────────────────────────┐
@@ -115,7 +117,6 @@ Flow:
                 │  │  3. COMMIT                    │  │
                 │  └───────────────┬───────────────┘  │
                 └──────────────────┼──────────────────┘
-                                   │
                                    ▼
                 ┌─────────────────────────────────────┐
                 │              Database               │
@@ -131,19 +132,18 @@ Flow:
                 │  │   Transaction Log (WAL/binlog)│  │
                 │  └───────────────┬───────────────┘  │
                 └──────────────────┼──────────────────┘
-                                   │  CDC
+                                   │  CDC(might need to change WAL_level)
                                    ▼
                 ┌─────────────────────────────────────┐
                 │              Debezium               │
-                │  Reads committed DB changes         │
-                │  Captures outbox events             │
+                │     Reads committed DB changes      │
+                │     Captures outbox events          │
                 └──────────────────┬──────────────────┘
-                                   │
                                    │ Publishes events
                                    ▼
                 ┌─────────────────────────────────────┐
                 │            Kafka Cluster            │
-                │  Topic: order-events                │
+                │          Topic: order-events        │
                 └─────────────────────────────────────┘
 
 Advantages:
@@ -153,3 +153,37 @@ Advantages:
 - The application does not need to mark each event as published; retention and cleanup can be managed separately.
 
 CDC still requires handling duplicate delivery and ordering requirements appropriately.
+Internal Architecture:
+                             ┌────────────────────────────┐
+                             │   PostgreSQL DB(Primary)   │
+                             └────────────┬───────────────┘
+                                          │ WAL changes Logical Replication
+                                          ▼
+            ┌────────────────────────────────────────────────────────────────┐
+            │                    Kafka Infrastructure                        │
+            │          ┌──────────────────┐    ┌──────────────────┐          │
+            │          │     Broker 1     │    │     Broker 2     │          │
+            │          └────────┬─────────┘    └────────┬─────────┘          │
+            │                   ↕                       ↕                    │
+            │  ────────────────────────────────────────────────────────────  │
+            │          ┌──────────────────┐    ┌──────────────────┐          │
+            │          │   Controller 1   │◄──►│   Controller 2   │          │
+            │          └──────────────────┘    └──────────────────┘          │
+            │  ┌──────────────────────────────────────────────────────────┐  │
+            │  │                    Kafka Connect                         │  │
+            │  │  ┌────────────────────────────────────────────────────┐  │  │
+            │  │  │          Debezium PostgreSQL Connector             │  │  │
+            │  │  │  • Connects to PostgreSQL                          │  │  │
+            │  │  │  • Uses a configured publication                   │  │  │
+            │  │  │  • Captures outbox table changes                   │  │  │
+            │  │  └──────────────────────────┬─────────────────────────┘  │  │
+            │  └─────────────────────────────┼────────────────────────────┘  │
+            └────────────────────────────────┼───────────────────────────────┘
+                                             │ Publishes outbox events
+                                             ▼
+                              ┌──────────────────────────────┐
+                              │         Kafka Topic          │
+                              │         order-events         │
+                              └──────────────────────────────┘
+
+All we have to provide: kafka-connect needs to know which DB plugin would be used + it needs to know all the config for reading the WAL(s).
